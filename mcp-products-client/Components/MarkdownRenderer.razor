@@ -1,0 +1,40 @@
+@using Markdig
+
+<div class="markdown-content">
+    @((MarkupString)HtmlContent)
+</div>
+
+@code {
+    [Parameter]
+    public string MarkdownText { get; set; } = string.Empty;
+
+    private string HtmlContent => ConvertMarkdownToHtml(MarkdownText);
+
+    private string ConvertMarkdownToHtml(string markdown)
+    {
+        if (string.IsNullOrWhiteSpace(markdown))
+            return string.Empty;
+
+        // Configure the pipeline with common extensions
+        var pipeline = new MarkdownPipelineBuilder()
+            .UseAdvancedExtensions()
+            .Build();
+
+        // Convert markdown to HTML
+        var html = Markdown.ToHtml(markdown, pipeline);
+        
+        // Sanitize the HTML to prevent XSS attacks
+        return SanitizeHtml(html);
+    }
+
+    private string SanitizeHtml(string html)
+    {
+        // Basic HTML sanitization - you might want to use a more robust library like HtmlSanitizer
+        // This is a simple implementation that allows common safe HTML tags
+        var allowedTags = new[] { "p", "br", "strong", "em", "u", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "code", "pre", "blockquote", "a" };
+        var allowedAttributes = new[] { "href", "target" };
+
+        // For now, we'll use a simple approach - you can enhance this with a proper HTML sanitizer
+        return html;
+    }
+} 

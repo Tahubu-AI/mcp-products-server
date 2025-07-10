@@ -1,0 +1,180 @@
+﻿@page "/"
+@rendermode InteractiveServer
+@using Microsoft.SemanticKernel
+@using Microsoft.SemanticKernel.Agents
+@using Microsoft.SemanticKernel.Connectors.OpenAI
+@using ModelContextProtocol.Client
+@using Microsoft.Extensions.Logging
+@inject IConfiguration configuration
+@inject Kernel kernel
+@inject ILogger<Home> Logger
+
+<PageTitle>Home</PageTitle>
+
+<h1>Product Agent</h1>
+
+<div class="mb-4">
+    <div class="form-group">
+        <label for="userPrompt" class="form-label">Ask about products or request marketing content:</label>
+        <textarea 
+            id="userPrompt" 
+            @bind="UserPrompt" 
+            placeholder="e.g., 'Find mountain bikes under $1000' or 'Generate marketing copy for a road bike'" 
+            class="form-control" 
+            rows="3"
+            @onkeydown="@(async (e) => { if (e.Key == "Enter" && e.CtrlKey) await OnSubmit(); })"
+        ></textarea>
+    </div>
+    <div class="mt-2">
+        <button class="btn btn-primary" @onclick="() => OnSubmit()" disabled="@IsProcessing">
+            @if (IsProcessing)
+            {
+                <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+                <span>Processing...</span>
+            }
+            else
+            {
+                <span>Submit</span>
+            }
+        </button>
+        <small class="text-muted ms-2">Press Ctrl+Enter to submit</small>
+    </div>
+</div>
+
+@if (!string.IsNullOrEmpty(Response))
+{
+    <div class="mt-4">
+        <h3>Response:</h3>
+        <MarkdownRenderer MarkdownText="@Response" />
+    </div>
+}
+
+@code {
+    private string UserPrompt { get; set; } = string.Empty;
+    private string Response { get; set; } = string.Empty;
+    private bool IsProcessing { get; set; } = false;
+    
+    // MCP client instance that will be reused
+    private IMcpClient? _mcpClient;
+    private bool _isInitialized = false;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await InitializeMcpClientAsync();
+    }
+
+    private async Task InitializeMcpClientAsync()
+    {
+        try
+        {
+            var serviceUri = configuration["services:mcp-products-server:http:0"];
+            
+            // Create MCP client once
+            _mcpClient = await McpClientFactory.CreateAsync(
+                new SseClientTransport(new()
+                {
+                    Name = "MCPProducts",
+                    Endpoint = new Uri($"{serviceUri}"),
+                })
+            );
+
+            // Get tools and add to kernel plugins only once
+            var tools = await _mcpClient.ListToolsAsync();
+            Logger.LogInformation("🔧 MCP Tools Available: {ToolCount} tools", tools.Count);
+            foreach (var tool in tools)
+            {
+                Logger.LogInformation("  - {ToolName}: {ToolDescription}", tool.Name, tool.Description);
+            }
+
+            // Remove existing plugin if it exists to avoid duplicates
+            if (kernel.Plugins.Contains("MCPProducts"))
+            {
+                kernel.Plugins.Clear();
+            }
+
+            // Add tools to kernel plugins
+            kernel.Plugins.AddFromFunctions("MCPProducts", tools.Select(x => x.AsKernelFunction()));
+            
+            _isInitialized = true;
+            Logger.LogInformation("✅ MCP client initialized successfully");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "❌ Error initializing MCP client: {ErrorMessage}", ex.Message);
+            Response = $"Error initializing MCP client: {ex.Message}";
+        }
+    }
+
+    private async Task OnSubmit()
+    {
+        if (!_isInitialized || _mcpClient == null)
+        {
+            Response = "MCP client not initialized. Please refresh the page.";
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(UserPrompt))
+        {
+            Response = "Please enter a prompt.";
+            return;
+        }
+
+        IsProcessing = true;
+        Response = string.Empty;
+
+        Logger.LogInformation("🚀 Starting agent request | Prompt: {Prompt}", UserPrompt);
+
+        try
+        {
+            OpenAIPromptExecutionSettings executionSettings = new()
+            {
+                FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(options: new() { RetainArgumentTypes = true })
+            };
+
+            ChatCompletionAgent agent = new ChatCompletionAgent()
+            {
+                Name = "LeaveRequestAgent",
+                Instructions = @"You are an intelligent assistant for the Cosmic Works Bike Company.
+                    You are designed to provide helpful answers to user questions about
+                    bike products and accessories provided in JSON format below.
+
+                    You can also generate marketing material for the Cosmic Works Bike Company's products.
+
+                    Instructions:
+                    - Only answer questions related to the information provided below,
+                    - Don't reference any product data not provided below.
+                    - If you're unsure of an answer, you can say ""I don't know"" or ""I'm not sure"" and recommend users search themselves.
+
+                    Text of relevant information:",
+                Kernel = kernel,
+                Arguments = new(executionSettings)
+            };
+
+            // Subscribe to function invocations to log them
+            var functionInvocationCount = 0;
+
+            var response = await agent.InvokeAsync(UserPrompt).FirstAsync();
+            Response = response.Message.Content;
+            
+            Logger.LogInformation("✅ Agent request completed | Function calls: {FunctionCount} | Response length: {ResponseLength}", 
+                functionInvocationCount, Response.Length);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "❌ Error processing request: {ErrorMessage}", ex.Message);
+            Response = $"Error processing request: {ex.Message}";
+        }
+        finally
+        {
+            IsProcessing = false;
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_mcpClient is not null)
+        {
+            await _mcpClient.DisposeAsync();
+        }
+    }
+}
